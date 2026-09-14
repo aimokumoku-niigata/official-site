@@ -762,14 +762,17 @@
       return new Date(dateStr).toLocaleDateString('ja-JP', opts);
     }
 
+    const eventsRequest = fetch('/api/events').then(res => {
+      if (!res.ok) throw new Error('api error');
+      return res.json();
+    });
+
     /* ── 募集中イベント描画 ── */
     async function loadUpcoming() {
       const el = document.getElementById('events-upcoming');
       try {
         // /api/events は本番(Cloudflare Pages)でのみ動作する
-        const res = await fetch('/api/events');
-        if (!res.ok) throw new Error('api error');
-        const data = await res.json();
+        const data = await eventsRequest;
 
         if (data.upcoming && data.upcoming.length > 0) {
           // hero CTAを最初の募集中イベントへのリンクに更新
@@ -811,20 +814,20 @@
     async function loadPast() {
       const el = document.getElementById('events-past');
       try {
-        const res = await fetch('data/events.json');
-        const data = await res.json();
+        const data = await eventsRequest;
         const past = data.past ?? [];
         if (past.length === 0) {
           el.innerHTML = '<li>アーカイブはありません</li>';
           return;
         }
         el.innerHTML = past.map(ev => {
-          const hasUrl = ev.url && ev.url !== 'TODO';
-          const dateStr = ev.date && ev.date !== 'TODO' ? fmtDate(ev.date) : null;
-          const label = `${ev.location ?? ''}#${ev.no}`;
-          const title = hasUrl
-            ? `<a href="${ev.url}" target="_blank" rel="noopener">${ev.title}</a>`
-            : `<span>${ev.title}</span>`;
+          const dateStr = fmtDate(ev.date);
+          const hasNo = ev.no != null;
+          const label = hasNo ? `新潟#${ev.no}` : '新潟';
+          const name = hasNo ? `AIもくもく会 新潟 #${ev.no}` : ev.title;
+          const title = ev.url
+            ? `<a href="${ev.url}" target="_blank" rel="noopener">${name}</a>`
+            : `<span>${name}</span>`;
           return `
           <li>
             <span class="past-no">${label}</span>

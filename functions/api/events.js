@@ -1,104 +1,56 @@
-const NOTE_RSS   = 'https://note.com/aimokumoku/rss';
-const PEATIX_RE  = /https?:\/\/(?:[\w-]+\.)?peatix\.com\/event\/(\d+)[^\s"'<>]*/gi;
+const PEATIX_API = 'https://peatix-api.com/v4/groups';
+const GROUP_IDS  = [16543330, 16521341];
 const FETCH_OPTS = { headers: { 'User-Agent': 'Mozilla/5.0 (compatible; site-fetcher/1.0)' } };
 
-async function parseRss(xml) {
-  const items = [];
-  const itemRe = /<item>([\s\S]*?)<\/item>/gi;
-  let m;
-  while ((m = itemRe.exec(xml)) !== null) {
-    const block = m[1];
-    const link = block.match(/<link>([\s\S]*?)<\/link>/)?.[1]?.trim() ?? '';
-    if (link) items.push(link);
-  }
-  return items;
+const jstDate = new Intl.DateTimeFormat('sv-SE', { timeZone: 'Asia/Tokyo', year: 'numeric', month: '2-digit', day: '2-digit' });
+const jstTime = new Intl.DateTimeFormat('ja-JP', { timeZone: 'Asia/Tokyo', hour: '2-digit', minute: '2-digit', hour12: false });
+
+async function fetchGroupEvents(groupId, kind) {
+  const res = await fetch(`${PEATIX_API}/${groupId}/${kind}?limit=100`, FETCH_OPTS);
+  if (!res.ok) throw new Error(`peatix ${kind} fetch failed: ${res.status}`);
+  const body = await res.json();
+  return body.data ?? [];
 }
 
-async function fetchText(url) {
-  try {
-    const res = await fetch(url, FETCH_OPTS);
-    if (!res.ok) return '';
-    // URLは属性値(href/data-src等)に埋まっているので生HTMLのまま返す
-    return await res.text();
-  } catch {
-    return '';
-  }
+function toEvent(e) {
+  const start = e.start?.utc ? new Date(e.start.utc) : null;
+  const end   = e.end?.utc ? new Date(e.end.utc) : null;
+  const no    = e.name?.match(/#(\d+)/)?.[1];
+  return {
+    id:        e.id,
+    no:        no != null ? Number(no) : null,
+    title:     e.name ?? '',
+    date:      start ? jstDate.format(start) : null,
+    timeStart: start ? jstTime.format(start) : null,
+    timeEnd:   end ? jstTime.format(end) : null,
+    url:       e.details?.shortUrl ?? `https://peatix.com/event/${e.id}`,
+    isOpen:    e.status === 'open',
+    status:    e.status ?? '',
+    startUtc:  e.start?.utc ?? '',
+  };
 }
 
-async function fetchEventData(eventId) {
-  try {
-    const res = await fetch(
-      `https://peatix.com/event/${eventId}/get_view_data`,
-      FETCH_OPTS
-    );
-    if (!res.ok) return null;
-    const body = await res.json();
-    // レスポンスは { json_data: { event: {...} } } の形
-    return body?.json_data?.event ?? body;
-  } catch {
-    return null;
-  }
+async function collect(kind) {
+  const lists = await Promise.all(GROUP_IDS.map(id => fetchGroupEvents(id, kind)));
+  const seen = new Set();
+  return lists.flat()
+    .filter(e => !seen.has(e.id) && seen.add(e.id))
+    .map(toEvent);
 }
 
 export async function onRequest() {
   try {
-    // 1. note RSS から直近5件の記事URLを取得
-    const rssRes = await fetch(NOTE_RSS, FETCH_OPTS);
-    if (!rssRes.ok) throw new Error('rss fetch failed');
-    const articleUrls = await parseRss(await rssRes.text());
-
-    // 2. 各記事の本文からPeatixのイベントIDを抽出
-    const seenIds = new Set();
-    const eventIds = [];
-
-    for (const url of articleUrls.slice(0, 5)) {
-      const text = await fetchText(url);
-      let match;
-      PEATIX_RE.lastIndex = 0;
-      while ((match = PEATIX_RE.exec(text)) !== null) {
-        const id = match[1];
-        if (!seenIds.has(id)) {
-          seenIds.add(id);
-          eventIds.push(id);
-        }
-      }
-    }
-
-    // 3. 各イベントのデータを /get_view_data で取得
-    const events = await Promise.all(
-      eventIds.map(async id => {
-        const d = await fetchEventData(id);
-        if (!d) return null;
-        return {
-          id,
-          title:    d.name ?? '',
-          date:     d.datetime ? d.datetime.split(' ')[0] : null,
-          timeStart: d.timeStart ?? null,
-          timeEnd:   d.timeEnd  ?? null,
-          url:      `https://peatix.com/event/${id}`,
-          isOpen:   d.isOpen   ?? false,
-          isFinished: d.isFinished ?? false,
-          status:   d.status   ?? '',
-        };
-      })
-    );
-
-    // 4. 開催日で過去/今後を分類
-    const now = new Date();
-    now.setHours(0, 0, 0, 0);
-
-    const valid    = events.filter(Boolean);
-    const upcoming = valid.filter(e => !e.date || new Date(e.date) >= now);
-    const past     = valid.filter(e =>  e.date && new Date(e.date) <  now);
+    const [upcoming, past] = await Promise.all([collect('upcoming-events'), collect('past-events')]);
+    upcoming.sort((a, b) => a.startUtc.localeCompare(b.startUtc));
+    past.sort((a, b) => b.startUtc.localeCompare(a.startUtc));
 
     return new Response(JSON.stringify({ upcoming, past }), {
       headers: {
         'Content-Type': 'application/json; charset=utf-8',
         'Access-Control-Allow-Origin': '*',
-        'Cache-Control': 'public, max-age=21600, s-maxage=21600',
+        'Cache-Control': 'public, max-age=3600, s-maxage=3600',
       },
     });
-
   } catch (err) {
     return new Response(JSON.stringify({ error: err.message, upcoming: [], past: [] }), {
       status: 502,
